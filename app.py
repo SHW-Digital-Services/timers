@@ -24,6 +24,7 @@ PRESET_TIMERS = {
     "25-minute timer": 25 * 60,
     "5-minute timer": 5 * 60,
 }
+CUSTOM_TIMER_MODE = "Custom timer"
 POMODORO_MODE = "Pomodoro"
 SOUND_FILES = {
     "Work": Path(__file__).with_name("sounds") / "work.mp3",
@@ -261,15 +262,29 @@ def _render_session_audio(timer: dict[str, int | float | str] | None) -> None:
     )
 
 
+def _format_remaining_time(remaining_seconds: int) -> str:
+    hours, remainder = divmod(remaining_seconds, 60 * 60)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
 def _render_clock(
     phase: str,
     remaining_seconds: int,
     duration_seconds: int,
+    *,
+    elapsed_seconds: float,
+    is_running: bool,
 ) -> None:
-    minutes, seconds = divmod(remaining_seconds, 60)
+    display_time = _format_remaining_time(remaining_seconds)
     remaining_percent = 100 * remaining_seconds / duration_seconds
     circumference = 2 * math.pi * 108
     progress_length = circumference * remaining_percent / 100
+    second_angle = (elapsed_seconds % 60) * 6
+    minute_angle = (elapsed_seconds % 3600) * 0.1
+    hour_angle = (elapsed_seconds % 43200) / 120
 
     tick_marks = []
     for tick in range(60):
@@ -325,6 +340,51 @@ def _render_clock(
             transform: rotate(-90deg);
             transform-origin: 120px 120px;
           }}
+          .timer-clock-hand {{
+            fill: none;
+            stroke: currentColor;
+            stroke-linecap: round;
+            transform-box: view-box;
+            transform-origin: center;
+          }}
+          .clock-hour-hand {{
+            stroke-width: 5;
+            opacity: 0.85;
+          }}
+          .clock-minute-hand {{
+            stroke-width: 3.5;
+            opacity: 0.9;
+          }}
+          .clock-second-hand {{
+            stroke: #e11d48;
+            stroke-width: 2;
+          }}
+          .clock-center-cap {{
+            fill: #e11d48;
+          }}
+          @keyframes clock-hand-turn {{
+            from {{ transform: rotate(0deg); }}
+            to {{ transform: rotate(360deg); }}
+          }}
+          @media (prefers-reduced-motion: no-preference) {{
+            .timer-clock-hand.is-running {{
+              animation-name: clock-hand-turn;
+              animation-timing-function: linear;
+              animation-iteration-count: infinite;
+            }}
+            .clock-second-hand.is-running {{
+              animation-duration: 60s;
+              animation-delay: -{elapsed_seconds % 60:.3f}s;
+            }}
+            .clock-minute-hand.is-running {{
+              animation-duration: 3600s;
+              animation-delay: -{elapsed_seconds % 3600:.3f}s;
+            }}
+            .clock-hour-hand.is-running {{
+              animation-duration: 43200s;
+              animation-delay: -{elapsed_seconds % 43200:.3f}s;
+            }}
+          }}
           .clock-tick {{
             stroke: currentColor;
             stroke-width: 1.5;
@@ -351,7 +411,7 @@ def _render_clock(
             pointer-events: none;
           }}
           .timer-clock-time {{
-            font-size: clamp(2.5rem, 11vw, 3.75rem);
+            font-size: clamp(2rem, 9vw, 3.75rem);
             font-variant-numeric: tabular-nums;
             font-weight: 650;
             letter-spacing: -0.06em;
@@ -383,7 +443,7 @@ def _render_clock(
               max="100"
               value="{remaining_percent:.2f}"
               aria-label="{phase} time remaining"
-              aria-valuetext="{minutes:02d}:{seconds:02d} remaining"
+              aria-valuetext="{display_time} remaining"
             ></progress>
             <svg viewBox="0 0 240 240" aria-hidden="true">
               <circle
@@ -396,13 +456,32 @@ def _render_clock(
                 stroke-dasharray="{progress_length:.2f} {circumference:.2f}"
               />
               {''.join(tick_marks)}
+              <g
+                class="timer-clock-hand clock-hour-hand{' is-running' if is_running else ''}"
+                style="transform: rotate({hour_angle:.3f}deg)"
+              >
+                <line x1="120" y1="120" x2="120" y2="84" />
+              </g>
+              <g
+                class="timer-clock-hand clock-minute-hand{' is-running' if is_running else ''}"
+                style="transform: rotate({minute_angle:.3f}deg)"
+              >
+                <line x1="120" y1="120" x2="120" y2="65" />
+              </g>
+              <g
+                class="timer-clock-hand clock-second-hand{' is-running' if is_running else ''}"
+                style="transform: rotate({second_angle:.3f}deg)"
+              >
+                <line x1="120" y1="136" x2="120" y2="52" />
+              </g>
               <text class="clock-number" x="120" y="46">12</text>
               <text class="clock-number" x="194" y="120">3</text>
               <text class="clock-number" x="120" y="194">6</text>
               <text class="clock-number" x="46" y="120">9</text>
+              <circle class="clock-center-cap" cx="120" cy="120" r="4" />
             </svg>
             <div class="timer-clock-center" aria-hidden="true">
-              <div class="timer-clock-time">{minutes:02d}:{seconds:02d}</div>
+              <div class="timer-clock-time">{display_time}</div>
               <div class="timer-clock-caption">remaining</div>
             </div>
           </div>
@@ -421,24 +500,28 @@ def _render_timer() -> None:
         return
 
     if timer["status"] == "running":
-        remaining_seconds = max(
-            0, math.ceil(float(timer["deadline"]) - time.monotonic())
+        exact_remaining_seconds = max(
+            0.0, float(timer["deadline"]) - time.monotonic()
         )
+        remaining_seconds = math.ceil(exact_remaining_seconds)
         if remaining_seconds == 0:
             if timer["mode"] == POMODORO_MODE:
                 _advance_pomodoro(timer)
                 remaining_seconds = int(timer["duration_seconds"])
+                exact_remaining_seconds = float(timer["duration_seconds"])
             else:
                 timer["status"] = "complete"
                 timer["remaining_seconds"] = 0
+                exact_remaining_seconds = 0
                 _log_history_event(timer, "completed", remaining_seconds=0)
                 st.toast("Timer complete.")
     elif timer["status"] == "awaiting_continue":
         remaining_seconds = 0
+        exact_remaining_seconds = 0
     else:
-        remaining_seconds = math.ceil(float(timer["remaining_seconds"]))
+        exact_remaining_seconds = max(0.0, float(timer["remaining_seconds"]))
+        remaining_seconds = math.ceil(exact_remaining_seconds)
 
-    minutes, seconds = divmod(remaining_seconds, 60)
     if timer["status"] == "awaiting_continue":
         st.success("Long break complete.")
         st.write("Would you like to continue with another focus session?")
@@ -468,6 +551,8 @@ def _render_timer() -> None:
             str(timer["phase"]),
             0,
             int(timer["duration_seconds"]),
+            elapsed_seconds=float(timer["duration_seconds"]),
+            is_running=False,
         )
     else:
         st.subheader(timer["phase"])
@@ -475,6 +560,10 @@ def _render_timer() -> None:
             str(timer["phase"]),
             remaining_seconds,
             int(timer["duration_seconds"]),
+            elapsed_seconds=max(
+                0.0, float(timer["duration_seconds"]) - exact_remaining_seconds
+            ),
+            is_running=timer["status"] == "running",
         )
 
     if timer["status"] == "running":
@@ -525,16 +614,41 @@ def _render_timer() -> None:
 
 st.set_page_config(page_title="Focus timer", page_icon="⏱️")
 st.title("Focus timer")
-st.write("Choose a timer, or set your own Pomodoro work and break lengths.")
+st.write(
+    "Choose a preset, make a custom timer, or set your Pomodoro session and break lengths."
+)
 
 timer_mode = st.selectbox(
     "Timer",
-    [*PRESET_TIMERS, POMODORO_MODE],
+    [*PRESET_TIMERS, CUSTOM_TIMER_MODE, POMODORO_MODE],
+    key="timer_mode",
 )
 
 with st.form("timer_settings"):
     pomodoro_settings = {}
-    if timer_mode == POMODORO_MODE:
+    custom_duration = 5
+    custom_time_unit = None
+    if timer_mode == CUSTOM_TIMER_MODE:
+        duration_column, unit_column = st.columns(2, vertical_alignment="bottom")
+        with duration_column:
+            custom_duration = st.number_input(
+                "Custom timer duration",
+                min_value=1,
+                max_value=1440,
+                value=5,
+                step=1,
+                key="custom_timer_duration",
+            )
+        with unit_column:
+            custom_time_unit = st.segmented_control(
+                "Time unit",
+                ["Seconds", "Minutes", "Hours"],
+                default="Minutes",
+                required=True,
+                key="custom_timer_unit",
+                width="stretch",
+            )
+    elif timer_mode == POMODORO_MODE:
         work_minutes = st.number_input(
             "Focused session length (minutes)",
             min_value=1,
@@ -568,12 +682,26 @@ with st.form("timer_settings"):
     }
     start_timer = st.form_submit_button(
         "Start timer",
+        key="start_timer",
         disabled=timer_is_active,
         width="stretch",
     )
 
 if start_timer:
-    if timer_mode == POMODORO_MODE:
+    if timer_mode == CUSTOM_TIMER_MODE:
+        if custom_time_unit is None:
+            st.error("Choose a unit for your custom timer.")
+        else:
+            unit_seconds = {
+                "Seconds": 1,
+                "Minutes": 60,
+                "Hours": 60 * 60,
+            }[custom_time_unit]
+            _start_timer(
+                CUSTOM_TIMER_MODE,
+                int(custom_duration * unit_seconds),
+            )
+    elif timer_mode == POMODORO_MODE:
         _start_timer(
             timer_mode,
             pomodoro_settings["work_seconds"],
