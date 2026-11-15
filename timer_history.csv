@@ -5,3 +5,4 @@ timestamp,session_id,event,timer,phase,duration_seconds,remaining_seconds
 2026-11-15T16:21:55+00:00,2ab82e119a654391b578538ca69c6faf,phase_completed,Pomodoro,Work,60,0
 2026-11-15T16:22:55+00:00,2ab82e119a654391b578538ca69c6faf,phase_completed,Pomodoro,Short break,60,0
 2026-11-15T16:23:14+00:00,2ab82e119a654391b578538ca69c6faf,stopped,Pomodoro,Work,60,41
+2026-11-15T17:03:41+00:00,a7eec9cdccf14d58b9fe9af247ecbf62,started,Pomodoro,Work,1500,1500
