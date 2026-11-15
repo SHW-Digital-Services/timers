@@ -67,7 +67,11 @@ def _start_timer(
     short_break_seconds: int | None = None,
     long_break_seconds: int | None = None,
     sessions_before_long_break: int = 3,
+    total_focus_seconds: int | None = None,
 ) -> None:
+    if total_focus_seconds is not None:
+        duration_seconds = min(duration_seconds, total_focus_seconds)
+
     timer = {
         "mode": mode,
         "phase": "Work" if mode == POMODORO_MODE else mode,
@@ -86,21 +90,80 @@ def _start_timer(
             long_break_seconds=long_break_seconds,
             sessions_before_long_break=sessions_before_long_break,
         )
+        if total_focus_seconds is not None:
+            timer.update(
+                total_focus_seconds=total_focus_seconds,
+                completed_focus_seconds=0,
+                completed_poms=0,
+            )
 
     st.session_state["timer"] = timer
     _log_history_event(timer, "started", remaining_seconds=duration_seconds)
+
+
+def _calculate_pomodoro_plan(
+    total_focus_seconds: int,
+    work_seconds: int,
+    short_break_seconds: int,
+    long_break_seconds: int,
+    sessions_before_long_break: int,
+) -> dict[str, int]:
+    planned_poms = (total_focus_seconds + work_seconds - 1) // work_seconds
+    planned_breaks = planned_poms - 1
+    long_breaks = planned_breaks // sessions_before_long_break
+    short_breaks = planned_breaks - long_breaks
+    total_duration_seconds = (
+        total_focus_seconds
+        + short_breaks * short_break_seconds
+        + long_breaks * long_break_seconds
+    )
+    return {
+        "planned_poms": planned_poms,
+        "short_breaks": short_breaks,
+        "long_breaks": long_breaks,
+        "total_duration_seconds": total_duration_seconds,
+    }
+
+
+def _next_pomodoro_work_seconds(timer: dict[str, int | float | str]) -> int:
+    work_seconds = int(timer["work_seconds"])
+    if "total_focus_seconds" in timer:
+        remaining_focus_seconds = int(timer["total_focus_seconds"]) - int(
+            timer["completed_focus_seconds"]
+        )
+        return min(work_seconds, remaining_focus_seconds)
+    return work_seconds
 
 
 def _advance_pomodoro(timer: dict[str, int | float | str]) -> None:
     completed_phase = timer["phase"]
     _log_history_event(timer, "phase_completed", remaining_seconds=0)
     if completed_phase == "Long break":
-        timer["status"] = "awaiting_continue"
-        timer["remaining_seconds"] = 0
-        st.toast("Long break complete.")
-        return
+        if "total_focus_seconds" in timer:
+            next_phase = "Work"
+            next_duration = _next_pomodoro_work_seconds(timer)
+        else:
+            timer["status"] = "awaiting_continue"
+            timer["remaining_seconds"] = 0
+            st.toast("Long break complete.")
+            return
+    elif completed_phase == "Work":
+        if "total_focus_seconds" in timer:
+            timer["completed_focus_seconds"] = (
+                int(timer["completed_focus_seconds"])
+                + int(timer["duration_seconds"])
+            )
+            timer["completed_poms"] = int(timer["completed_poms"]) + 1
+            if int(timer["completed_focus_seconds"]) >= int(
+                timer["total_focus_seconds"]
+            ):
+                timer["status"] = "complete"
+                timer["phase"] = "Pomodoro"
+                timer["remaining_seconds"] = 0
+                _log_history_event(timer, "completed", remaining_seconds=0)
+                st.toast("Focus plan complete.")
+                return
 
-    if completed_phase == "Work":
         completed_sessions = int(timer["completed_work_sessions"]) + 1
         timer["completed_work_sessions"] = completed_sessions
         if completed_sessions == int(timer["sessions_before_long_break"]):
@@ -112,7 +175,7 @@ def _advance_pomodoro(timer: dict[str, int | float | str]) -> None:
             next_duration = int(timer["short_break_seconds"])
     else:
         next_phase = "Work"
-        next_duration = int(timer["work_seconds"])
+        next_duration = _next_pomodoro_work_seconds(timer)
 
     timer["phase"] = next_phase
     timer["duration_seconds"] = next_duration
@@ -546,7 +609,10 @@ def _render_timer() -> None:
             _log_history_event(timer, "finished", remaining_seconds=0)
             st.rerun()
     elif timer["status"] == "complete":
-        st.success(f"{timer['phase']} complete!")
+        if "total_focus_seconds" in timer:
+            st.success("Focus plan complete!")
+        else:
+            st.success(f"{timer['phase']} complete!")
         _render_clock(
             str(timer["phase"]),
             0,
@@ -556,6 +622,18 @@ def _render_timer() -> None:
         )
     else:
         st.subheader(timer["phase"])
+        if "total_focus_seconds" in timer:
+            plan = _calculate_pomodoro_plan(
+                int(timer["total_focus_seconds"]),
+                int(timer["work_seconds"]),
+                int(timer["short_break_seconds"]),
+                int(timer["long_break_seconds"]),
+                int(timer["sessions_before_long_break"]),
+            )
+            st.caption(
+                f"Focus session {int(timer['completed_poms']) + 1} "
+                f"of {plan['planned_poms']}"
+            )
         _render_clock(
             str(timer["phase"]),
             remaining_seconds,
@@ -624,31 +702,103 @@ timer_mode = st.selectbox(
     key="timer_mode",
 )
 
-with st.form("timer_settings"):
-    pomodoro_settings = {}
-    custom_duration = 5
-    custom_time_unit = None
-    if timer_mode == CUSTOM_TIMER_MODE:
-        duration_column, unit_column = st.columns(2, vertical_alignment="bottom")
-        with duration_column:
-            custom_duration = st.number_input(
-                "Custom timer duration",
-                min_value=1,
-                max_value=1440,
-                value=5,
+active_timer = st.session_state.get("timer")
+timer_is_active = active_timer is not None and active_timer["status"] in {
+    "running",
+    "paused",
+    "awaiting_continue",
+}
+pomodoro_settings = {}
+total_focus_seconds = None
+custom_duration = 5
+custom_time_unit = None
+
+if timer_mode == POMODORO_MODE:
+    pomodoro_plan_type = st.radio(
+        "Pomodoro plan",
+        ["Total focus time", "Set session lengths"],
+        horizontal=True,
+        key="pomodoro_plan_type",
+    )
+    if pomodoro_plan_type == "Total focus time":
+        hours_column, minutes_column = st.columns(2)
+        with hours_column:
+            total_focus_hours = st.number_input(
+                "Total focus time (hours)",
+                min_value=0,
+                max_value=168,
+                value=2,
                 step=1,
-                key="custom_timer_duration",
+                key="pomodoro_total_hours",
             )
-        with unit_column:
-            custom_time_unit = st.segmented_control(
-                "Time unit",
-                ["Seconds", "Minutes", "Hours"],
-                default="Minutes",
-                required=True,
-                key="custom_timer_unit",
-                width="stretch",
+        with minutes_column:
+            total_focus_minutes = st.number_input(
+                "Additional minutes",
+                min_value=0,
+                max_value=59,
+                value=0,
+                step=1,
+                key="pomodoro_total_minutes",
             )
-    elif timer_mode == POMODORO_MODE:
+        work_minutes = st.number_input(
+            "Work session length (minutes)",
+            min_value=1,
+            max_value=1440,
+            value=25,
+            key="pomodoro_work_minutes",
+        )
+        short_break_minutes = st.number_input(
+            "Short break (minutes)",
+            min_value=1,
+            max_value=1440,
+            value=5,
+            key="pomodoro_short_break_minutes",
+        )
+        long_break_minutes = st.number_input(
+            "Long break (minutes)",
+            min_value=1,
+            max_value=1440,
+            value=15,
+            key="pomodoro_long_break_minutes",
+        )
+        sessions_before_long_break = st.number_input(
+            "Work sessions before a long break",
+            min_value=1,
+            max_value=12,
+            value=3,
+            key="pomodoro_sessions_before_long_break",
+        )
+        total_focus_seconds = int(total_focus_hours * 60 + total_focus_minutes) * 60
+        pomodoro_settings = {
+            "work_seconds": int(work_minutes * 60),
+            "short_break_seconds": int(short_break_minutes * 60),
+            "long_break_seconds": int(long_break_minutes * 60),
+            "sessions_before_long_break": int(sessions_before_long_break),
+        }
+        if total_focus_seconds == 0:
+            st.warning("Enter a total focus time of at least one minute.")
+        else:
+            plan = _calculate_pomodoro_plan(
+                total_focus_seconds,
+                pomodoro_settings["work_seconds"],
+                pomodoro_settings["short_break_seconds"],
+                pomodoro_settings["long_break_seconds"],
+                pomodoro_settings["sessions_before_long_break"],
+            )
+            short_break_label = (
+                "short break" if plan["short_breaks"] == 1 else "short breaks"
+            )
+            long_break_label = (
+                "long break" if plan["long_breaks"] == 1 else "long breaks"
+            )
+            st.info(
+                f"{plan['planned_poms']} Poms (focus sessions), "
+                f"{plan['short_breaks']} {short_break_label}, and "
+                f"{plan['long_breaks']} {long_break_label}. "
+                f"Estimated total time including breaks: "
+                f"{_format_remaining_time(plan['total_duration_seconds'])}."
+            )
+    else:
         work_minutes = st.number_input(
             "Focused session length (minutes)",
             min_value=1,
@@ -673,19 +823,42 @@ with st.form("timer_settings"):
             "long_break_seconds": int(long_break_minutes * 60),
             "sessions_before_long_break": int(sessions_before_long_break),
         }
-
-    active_timer = st.session_state.get("timer")
-    timer_is_active = active_timer is not None and active_timer["status"] in {
-        "running",
-        "paused",
-        "awaiting_continue",
-    }
-    start_timer = st.form_submit_button(
+    start_timer = st.button(
         "Start timer",
-        key="start_timer",
-        disabled=timer_is_active,
+        key="start_pomodoro_timer",
+        disabled=timer_is_active or total_focus_seconds == 0,
         width="stretch",
     )
+else:
+    with st.form("timer_settings"):
+        if timer_mode == CUSTOM_TIMER_MODE:
+            duration_column, unit_column = st.columns(
+                2, vertical_alignment="bottom"
+            )
+            with duration_column:
+                custom_duration = st.number_input(
+                    "Custom timer duration",
+                    min_value=1,
+                    max_value=1440,
+                    value=5,
+                    step=1,
+                    key="custom_timer_duration",
+                )
+            with unit_column:
+                custom_time_unit = st.segmented_control(
+                    "Time unit",
+                    ["Seconds", "Minutes", "Hours"],
+                    default="Minutes",
+                    required=True,
+                    key="custom_timer_unit",
+                    width="stretch",
+                )
+        start_timer = st.form_submit_button(
+            "Start timer",
+            key="start_timer",
+            disabled=timer_is_active,
+            width="stretch",
+        )
 
 if start_timer:
     if timer_mode == CUSTOM_TIMER_MODE:
@@ -702,11 +875,21 @@ if start_timer:
                 int(custom_duration * unit_seconds),
             )
     elif timer_mode == POMODORO_MODE:
-        _start_timer(
-            timer_mode,
-            pomodoro_settings["work_seconds"],
-            **pomodoro_settings,
-        )
+        if total_focus_seconds == 0:
+            st.error("Enter a total focus time of at least one minute.")
+        elif total_focus_seconds is not None:
+            _start_timer(
+                timer_mode,
+                pomodoro_settings["work_seconds"],
+                **pomodoro_settings,
+                total_focus_seconds=total_focus_seconds,
+            )
+        else:
+            _start_timer(
+                timer_mode,
+                pomodoro_settings["work_seconds"],
+                **pomodoro_settings,
+            )
     else:
         _start_timer(timer_mode, PRESET_TIMERS[timer_mode])
 
