@@ -33,7 +33,6 @@ SOUND_FILES = {
     "Long break": Path(__file__).with_name("sounds") / "longbreak.mp3",
 }
 BELL_FILE = Path(__file__).with_name("sounds") / "bell.mp3"
-BELL_FILE = Path(__file__).with_name("sounds") / "bell.mp3"
 
 
 def _log_history_event(
@@ -212,9 +211,19 @@ def _render_audio_tracks() -> None:
                 format="audio/mpeg",
                 alt="Completion bell",
             )
+        st.slider(
+            "Volume",
+            min_value=0,
+            max_value=100,
+            value=100,
+            step=1,
+            format="%d%%",
+            key="timer_audio_volume",
+        )
+        st.toggle("Mute", key="timer_audio_muted")
 
 
-def _render_session_audio(timer: dict[str, int | float | str] | None) -> None:
+def _render_session_audio(timer: dict[str, TimerValue] | None) -> None:
     if timer is None or timer["status"] in {"complete", "awaiting_continue"}:
         phase = "Work"
         status = "idle"
@@ -640,7 +649,6 @@ def _render_timer() -> None:
         )
         remaining_seconds = math.ceil(exact_remaining_seconds)
         if remaining_seconds == 0:
-            timer["completion_id"] = uuid4().hex
             timer["completion_id"] = uuid4().hex
             if timer["mode"] == POMODORO_MODE:
                 _advance_pomodoro(timer)
