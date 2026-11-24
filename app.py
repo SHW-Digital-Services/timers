@@ -19,6 +19,7 @@ HISTORY_FIELDS = (
     "duration_seconds",
     "remaining_seconds",
 )
+TimerValue = int | float | str | list[str]
 PRESET_TIMERS = {
     "1-hour timer": 60 * 60,
     "25-minute timer": 25 * 60,
@@ -31,10 +32,11 @@ SOUND_FILES = {
     "Short break": Path(__file__).with_name("sounds") / "shortbreak.mp3",
     "Long break": Path(__file__).with_name("sounds") / "longbreak.mp3",
 }
+BELL_FILE = Path(__file__).with_name("sounds") / "bell.mp3"
 
 
 def _log_history_event(
-    timer: dict[str, int | float | str],
+    timer: dict[str, TimerValue],
     event: str,
     *,
     remaining_seconds: int | float | None = None,
@@ -68,11 +70,12 @@ def _start_timer(
     long_break_seconds: int | None = None,
     sessions_before_long_break: int = 3,
     total_focus_seconds: int | None = None,
+    tasks: list[str] | None = None,
 ) -> None:
     if total_focus_seconds is not None:
         duration_seconds = min(duration_seconds, total_focus_seconds)
 
-    timer = {
+    timer: dict[str, TimerValue] = {
         "mode": mode,
         "phase": "Work" if mode == POMODORO_MODE else mode,
         "duration_seconds": duration_seconds,
@@ -80,6 +83,7 @@ def _start_timer(
         "status": "running",
         "remaining_seconds": duration_seconds,
         "completed_work_sessions": 0,
+        "completed_poms": 0,
         "session_id": uuid4().hex,
     }
 
@@ -90,11 +94,11 @@ def _start_timer(
             long_break_seconds=long_break_seconds,
             sessions_before_long_break=sessions_before_long_break,
         )
+        timer["tasks"] = tasks or []
         if total_focus_seconds is not None:
             timer.update(
                 total_focus_seconds=total_focus_seconds,
                 completed_focus_seconds=0,
-                completed_poms=0,
             )
 
     st.session_state["timer"] = timer
@@ -125,7 +129,7 @@ def _calculate_pomodoro_plan(
     }
 
 
-def _next_pomodoro_work_seconds(timer: dict[str, int | float | str]) -> int:
+def _next_pomodoro_work_seconds(timer: dict[str, TimerValue]) -> int:
     work_seconds = int(timer["work_seconds"])
     if "total_focus_seconds" in timer:
         remaining_focus_seconds = int(timer["total_focus_seconds"]) - int(
@@ -135,7 +139,7 @@ def _next_pomodoro_work_seconds(timer: dict[str, int | float | str]) -> int:
     return work_seconds
 
 
-def _advance_pomodoro(timer: dict[str, int | float | str]) -> None:
+def _advance_pomodoro(timer: dict[str, TimerValue]) -> None:
     completed_phase = timer["phase"]
     _log_history_event(timer, "phase_completed", remaining_seconds=0)
     if completed_phase == "Long break":
@@ -148,12 +152,12 @@ def _advance_pomodoro(timer: dict[str, int | float | str]) -> None:
             st.toast("Long break complete.")
             return
     elif completed_phase == "Work":
+        timer["completed_poms"] = int(timer["completed_poms"]) + 1
         if "total_focus_seconds" in timer:
             timer["completed_focus_seconds"] = (
                 int(timer["completed_focus_seconds"])
                 + int(timer["duration_seconds"])
             )
-            timer["completed_poms"] = int(timer["completed_poms"]) + 1
             if int(timer["completed_focus_seconds"]) >= int(
                 timer["total_focus_seconds"]
             ):
@@ -184,20 +188,42 @@ def _advance_pomodoro(timer: dict[str, int | float | str]) -> None:
     st.toast(f"{completed_phase} complete. Starting {next_phase.lower()}.")
 
 
+def _parse_pomodoro_tasks(tasks_text: str) -> list[str]:
+    return [task.strip() for task in tasks_text.splitlines() if task.strip()]
+
+
 def _render_audio_tracks() -> None:
     with st.expander("Session audio"):
-        for phase, sound_file in SOUND_FILES.items():
-            if not sound_file.is_file():
-                raise FileNotFoundError(f"Timer sound file not found: {sound_file}")
+        with st.container(key="timer_phase_tracks"):
+            for phase, sound_file in SOUND_FILES.items():
+                if not sound_file.is_file():
+                    raise FileNotFoundError(f"Timer sound file not found: {sound_file}")
+                st.audio(
+                    sound_file,
+                    format="audio/mpeg",
+                    loop=True,
+                    alt=f"{phase} session audio",
+                )
+        with st.container(key="timer_completion_bell"):
+            st.caption("Completion bell")
             st.audio(
-                sound_file,
+                BELL_FILE,
                 format="audio/mpeg",
-                loop=True,
-                alt=f"{phase} session audio",
+                alt="Completion bell",
             )
+        st.slider(
+            "Volume",
+            min_value=0,
+            max_value=100,
+            value=100,
+            step=1,
+            format="%d%%",
+            key="timer_audio_volume",
+        )
+        st.toggle("Mute", key="timer_audio_muted")
 
 
-def _render_session_audio(timer: dict[str, int | float | str] | None) -> None:
+def _render_session_audio(timer: dict[str, TimerValue] | None) -> None:
     if timer is None or timer["status"] in {"complete", "awaiting_continue"}:
         phase = "Work"
         status = "idle"
@@ -223,6 +249,9 @@ def _render_session_audio(timer: dict[str, int | float | str] | None) -> None:
             "status": status,
             "remainingSeconds": remaining_seconds,
             "startOnClick": start_on_click,
+            "completionId": timer.get("completion_id") if timer else None,
+            "volume": st.session_state.get("timer_audio_volume", 100) / 100,
+            "muted": st.session_state.get("timer_audio_muted", False),
         }
     )
     st.html(
@@ -231,6 +260,10 @@ def _render_session_audio(timer: dict[str, int | float | str] | None) -> None:
         <script>
         (() => {{
           const config = {player_config};
+          const phaseTracks = () =>
+            document.querySelectorAll(".st-key-timer_phase_tracks audio");
+          const completionBell = () =>
+            document.querySelector(".st-key-timer_completion_bell audio");
           let player = window.__focusTimerAudio;
           if (!player) {{
             player = {{
@@ -239,8 +272,13 @@ def _render_session_audio(timer: dict[str, int | float | str] | None) -> None:
               phase: "Work",
               startOnClick: false,
               status: "idle",
+              volume: 1,
+              muted: false,
+              completionId: null,
+              primedBell: null,
+              primingBell: false,
               audioForPhase(phase) {{
-                const audioPlayers = document.querySelectorAll("audio");
+                const audioPlayers = phaseTracks();
                 const playerIndex = {{
                   "Work": 0,
                   "Short break": 1,
@@ -254,19 +292,58 @@ def _render_session_audio(timer: dict[str, int | float | str] | None) -> None:
                 this.phase = next.phase;
                 this.status = next.status;
                 this.startOnClick = next.startOnClick;
+                this.volume = next.volume;
+                this.muted = next.muted;
                 this.endAt = performance.now() + next.remainingSeconds * 1000;
+                this.ring(next.completionId);
                 this.audio = this.audioForPhase(this.phase);
                 if (!this.audio) return;
                 this.audio.loop = true;
-                if (phaseChanged) this.audio.volume = 1;
-                document.querySelectorAll("audio").forEach((audio) => {{
+                phaseTracks().forEach((audio) => {{
                   if (audio !== this.audio) audio.pause();
                 }});
+                this.fade();
                 if (next.status === "running") {{
                   if (phaseChanged || this.audio.paused) this.play();
                 }} else {{
                   this.audio.pause();
-                  this.audio.volume = 1;
+                }}
+              }},
+              primeBell() {{
+                const bell = completionBell();
+                if (!bell || this.primingBell || this.primedBell === bell || !bell.paused) return;
+                const previousCompletion = this.completionId;
+                this.primingBell = true;
+                bell.muted = true;
+                bell.play().then(() => {{
+                  this.primedBell = bell;
+                  if (this.completionId === previousCompletion) {{
+                    bell.pause();
+                    bell.currentTime = 0;
+                    bell.muted = this.muted;
+                  }}
+                }}).catch(() => {{
+                  bell.muted = this.muted;
+                }}).finally(() => {{
+                  this.primingBell = false;
+                }});
+              }},
+              ring(completionId) {{
+                const bell = completionBell();
+                if (!bell) return;
+                bell.volume = this.volume;
+                if (completionId && completionId !== this.completionId) {{
+                  this.completionId = completionId;
+                  bell.muted = this.muted;
+                  bell.currentTime = 0;
+                  if (!this.muted && this.volume > 0) {{
+                    bell.play().catch(() => {{
+                      const status = document.getElementById("focus-timer-audio-status");
+                      if (status) status.textContent = "Play the completion bell in Session audio.";
+                    }});
+                  }}
+                }} else if (!this.primingBell) {{
+                  bell.muted = this.muted;
                 }}
               }},
               play() {{
@@ -284,12 +361,15 @@ def _render_session_audio(timer: dict[str, int | float | str] | None) -> None:
                 }});
               }},
               fade() {{
-                if (!this.audio || this.status !== "running") return;
+                if (!this.audio) return;
                 const secondsLeft = Math.max(
                   0,
                   (this.endAt - performance.now()) / 1000
                 );
-                this.audio.volume = Math.min(1, secondsLeft / 5);
+                const fade = this.status === "running"
+                  ? Math.min(1, secondsLeft / 5)
+                  : 1;
+                this.audio.volume = this.muted ? 0 : this.volume * fade;
               }},
             }};
             window.__focusTimerAudio = player;
@@ -304,6 +384,7 @@ def _render_session_audio(timer: dict[str, int | float | str] | None) -> None:
                     button.innerText.trim()
                   )
                 ) {{
+                  player.primeBell();
                   player.play();
                 }}
               }},
@@ -311,7 +392,7 @@ def _render_session_audio(timer: dict[str, int | float | str] | None) -> None:
             );
             window.setInterval(() => {{
               player.audio = player.audioForPhase(player.phase);
-              document.querySelectorAll("audio").forEach((audio) => {{
+              phaseTracks().forEach((audio) => {{
                 if (audio !== player.audio) audio.pause();
               }});
               player.fade();
@@ -568,6 +649,7 @@ def _render_timer() -> None:
         )
         remaining_seconds = math.ceil(exact_remaining_seconds)
         if remaining_seconds == 0:
+            timer["completion_id"] = uuid4().hex
             if timer["mode"] == POMODORO_MODE:
                 _advance_pomodoro(timer)
                 remaining_seconds = int(timer["duration_seconds"])
@@ -584,6 +666,18 @@ def _render_timer() -> None:
     else:
         exact_remaining_seconds = max(0.0, float(timer["remaining_seconds"]))
         remaining_seconds = math.ceil(exact_remaining_seconds)
+
+    tasks = timer.get("tasks", [])
+    completed_poms = int(timer.get("completed_poms", 0))
+    if isinstance(tasks, list) and tasks and timer["status"] != "complete":
+        if completed_poms < len(tasks):
+            task_label = f"Pom {completed_poms + 1}: {tasks[completed_poms]}"
+            if timer["phase"] == "Work":
+                st.info(f"**Current task** — {task_label}")
+            else:
+                st.caption(f"Next focus task — {task_label}")
+        else:
+            st.caption("No task is assigned to the next focus session.")
 
     if timer["status"] == "awaiting_continue":
         st.success("Long break complete.")
@@ -693,7 +787,7 @@ def _render_timer() -> None:
 st.set_page_config(page_title="Focus timer", page_icon="⏱️")
 st.title("Focus timer")
 st.write(
-    "Choose a preset, make a custom timer, or set your Pomodoro session and break lengths."
+    "Choose a preset or custom timer, or plan your Pomodoro focus time, breaks, and tasks."
 )
 
 timer_mode = st.selectbox(
@@ -710,10 +804,18 @@ timer_is_active = active_timer is not None and active_timer["status"] in {
 }
 pomodoro_settings = {}
 total_focus_seconds = None
+pomodoro_tasks = []
 custom_duration = 5
 custom_time_unit = None
 
 if timer_mode == POMODORO_MODE:
+    pomodoro_tasks_text = st.text_area(
+        "Tasks for focus sessions",
+        key="pomodoro_tasks",
+        placeholder="Write the project outline\nReview the draft\nReply to emails",
+        help="Enter one task per line. Tasks are assigned to focus sessions in order.",
+    )
+    pomodoro_tasks = _parse_pomodoro_tasks(pomodoro_tasks_text)
     pomodoro_plan_type = st.radio(
         "Pomodoro plan",
         ["Total focus time", "Set session lengths"],
@@ -798,6 +900,11 @@ if timer_mode == POMODORO_MODE:
                 f"Estimated total time including breaks: "
                 f"{_format_remaining_time(plan['total_duration_seconds'])}."
             )
+            if len(pomodoro_tasks) > plan["planned_poms"]:
+                st.warning(
+                    f"{len(pomodoro_tasks) - plan['planned_poms']} task(s) "
+                    "won't have a focus session in this plan."
+                )
     else:
         work_minutes = st.number_input(
             "Focused session length (minutes)",
@@ -883,12 +990,14 @@ if start_timer:
                 pomodoro_settings["work_seconds"],
                 **pomodoro_settings,
                 total_focus_seconds=total_focus_seconds,
+                tasks=pomodoro_tasks,
             )
         else:
             _start_timer(
                 timer_mode,
                 pomodoro_settings["work_seconds"],
                 **pomodoro_settings,
+                tasks=pomodoro_tasks,
             )
     else:
         _start_timer(timer_mode, PRESET_TIMERS[timer_mode])
