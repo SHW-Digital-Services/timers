@@ -256,6 +256,8 @@ def _render_session_audio(timer: dict[str, TimerValue] | None) -> None:
     )
     st.html(
         f"""
+        <button id="focus-timer-pip" type="button" hidden>Picture-in-picture</button>
+        <div id="focus-timer-pip-status" role="status"></div>
         <div id="focus-timer-audio-status" role="status"></div>
         <script>
         (() => {{
@@ -294,6 +296,7 @@ def _render_session_audio(timer: dict[str, TimerValue] | None) -> None:
                 this.startOnClick = next.startOnClick;
                 this.volume = next.volume;
                 this.muted = next.muted;
+                this.remainingSeconds = next.remainingSeconds;
                 this.endAt = performance.now() + next.remainingSeconds * 1000;
                 this.ring(next.completionId);
                 this.audio = this.audioForPhase(this.phase);
@@ -399,6 +402,60 @@ def _render_session_audio(timer: dict[str, TimerValue] | None) -> None:
             }}, 50);
           }}
           player.update(config);
+
+          const pip = window.documentPictureInPicture;
+          if (!pip) return;
+          const pipButton = document.getElementById("focus-timer-pip");
+          pipButton.hidden = false;
+          pipButton.onclick = async () => {{
+            const status = document.getElementById("focus-timer-pip-status");
+            status.textContent = "";
+            if (pip.window) {{
+              pip.window.focus();
+              return;
+            }}
+            try {{
+              const popup = await pip.requestWindow({{ width: 260, height: 135 }});
+              const doc = popup.document;
+              doc.title = "Focus timer";
+              doc.documentElement.lang = "en";
+              doc.documentElement.style.colorScheme = "light dark";
+              Object.assign(doc.body.style, {{
+                margin: "0",
+                minHeight: "100dvh",
+                display: "grid",
+                placeItems: "center",
+                background: "Canvas",
+                color: "CanvasText",
+              }});
+              const clock = doc.createElement("div");
+              clock.setAttribute("role", "timer");
+              clock.setAttribute("aria-label", "Time remaining");
+              Object.assign(clock.style, {{
+                font: "650 clamp(1.5rem, min(18vw, 45vh), 5rem) system-ui",
+                fontVariantNumeric: "tabular-nums",
+              }});
+              doc.body.append(clock);
+
+              const refreshClock = () => {{
+                const remaining = player.status === "running"
+                  ? (player.endAt - performance.now()) / 1000
+                  : player.remainingSeconds;
+                const seconds = Math.max(0, Math.ceil(remaining));
+                const hours = Math.floor(seconds / 3600);
+                const minutes = Math.floor(seconds / 60) % 60;
+                const fields = hours ? [hours, minutes, seconds % 60] : [minutes, seconds % 60];
+                const display = fields.map((value) => String(value).padStart(2, "0")).join(":");
+                if (clock.textContent !== display) clock.textContent = display;
+              }};
+              refreshClock();
+              const interval = popup.setInterval(refreshClock, 200);
+              popup.addEventListener("pagehide", () => popup.clearInterval(interval), {{ once: true }});
+            }} catch {{
+              const currentStatus = document.getElementById("focus-timer-pip-status");
+              if (currentStatus) currentStatus.textContent = "Could not open picture-in-picture.";
+            }}
+          }};
         }})();
         </script>
         """,
